@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DockerHub Lite</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-icon">🐳</span>
+            <span class="logo-text">DockerHub Lite</span>
+        </div>
+        <nav class="sidebar-nav">
+            <button class="nav-item active" data-tab="search"><span class="nav-icon">🔍</span> Поиск</button>
+            <button class="nav-item" data-tab="local"><span class="nav-icon">📦</span> Репозитории <span class="nav-badge" id="repoBadge">0</span></button>
+            <button class="nav-item" data-tab="history"><span class="nav-icon">📜</span> История</button>
+        </nav>
+        <div class="sidebar-stats" id="statsBar"></div>
+        <div class="sidebar-footer"><small>Работает без Docker</small></div>
+    </aside>
+
+    <div class="main-area">
+        <header class="topbar">
+            <h1 id="pageTitle">Поиск репозиториев</h1>
+            <div class="topbar-actions">
+                <button class="btn-log" onclick="toggleLogPanel()">📋 Логи <span class="log-count" id="logCount">0</span></button>
+            </div>
+        </header>
+
+        <main class="content">
+            <section class="tab-content active" id="tab-search">
+                <div class="search-hero">
+                    <div class="search-box">
+                        <input type="text" id="searchInput" placeholder="Поиск репозиториев на GitHub...">
+                        <button onclick="search()" class="btn-primary">Найти</button>
+                    </div>
+                </div>
+                <div id="searchResults" class="results-grid"></div>
+            </section>
+
+            <section class="tab-content" id="tab-local">
+                <div class="section-header">
+                    <h2>Скачанные репозитории</h2>
+                    <button onclick="loadRepos()" class="btn-secondary">🔄 Обновить</button>
+                </div>
+                <div id="repoList" class="cards-grid"></div>
+            </section>
+
+            <section class="tab-content" id="tab-history">
+                <div class="section-header">
+                    <h2>История операций</h2>
+                    <button onclick="loadHistory()" class="btn-secondary">🔄 Обновить</button>
+                </div>
+                <div id="historyList" class="history-list"></div>
+            </section>
+
+            <section class="tab-content" id="tab-details">
+                <div class="section-header">
+                    <h2 id="detailsTitle">Репозиторий</h2>
+                    <button onclick="switchTab('local')" class="btn-secondary">← Назад</button>
+                </div>
+                <div id="repoDetails"></div>
+            </section>
+
+            <section class="tab-content" id="tab-file">
+                <div class="section-header">
+                    <h2 id="fileTitle">Файл</h2>
+                    <button onclick="switchTab('details')" class="btn-secondary">← Назад</button>
+                </div>
+                <pre id="fileContent" class="file-viewer"></pre>
+            </section>
+
+            <!-- Консоль: скрыта, пока не нажата «Собрать» -->
+            <section class="tab-content" id="tab-console">
+                <div class="console-wrap">
+                    <div class="console-header-inline">
+                        <div class="console-title-inline">
+                            <span class="console-dot red"></span>
+                            <span class="console-dot yellow"></span>
+                            <span class="console-dot green"></span>
+                            <span id="consoleTitle">Консоль сборки</span>
+                        </div>
+                        <div class="console-actions-inline">
+                            <span class="console-status" id="consoleStatus">● ожидание</span>
+                            <button onclick="switchTab('details')" class="btn-secondary btn-sm">← Назад</button>
+                        </div>
+                    </div>
+                    <div class="console-body-inline" id="consoleBody"></div>
+                    <div class="console-footer-inline">
+                        <button onclick="installDepsFromConsole()" class="btn-secondary btn-sm" id="btnInstallDeps" style="display:none;">📦 Установить зависимости</button>
+                        <button onclick="clearConsole()" class="btn-secondary btn-sm">Очистить консоль</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div class="log-panel" id="logPanel">
+        <div class="log-header">
+            <h3>📋 Логи операций</h3>
+            <button onclick="toggleLogPanel()" class="btn-close">✕</button>
+        </div>
+        <div class="log-body" id="logBody"></div>
+        <div class="log-footer"><button onclick="clearLogs()" class="btn-secondary">Очистить</button></div>
+    </div>
+
+    <script>
+        let currentRepo = null;
+        let logs = [];
+        let consoleES = null;
+        let consoleRepoName = null;
+        let consoleHasDepError = false;
+
+        // ---------- Логи ----------
+        function addLog(type, message, status = 'info') {
+            logs.push({ time: new Date().toLocaleTimeString('ru-RU'), type, message, status });
+            renderLogs();
+            document.getElementById('logCount').textContent = logs.length;
+            if (status === 'error') document.getElementById('logPanel').classList.add('open');
+        }
+        function renderLogs() {
+            const body = document.getElementById('logBody');
+            if (logs.length === 0) { body.innerHTML = '<p class="log-empty">Логов пока нет.</p>'; return; }
+            body.innerHTML = logs.slice().reverse().map(l => `
+                <div class="log-item log-${l.status}">
+                    <span class="log-time">${l.time}</span>
+                    <span class="log-type">${l.type}</span>
+                    <span class="log-msg">${escapeHtml(l.message)}</span>
+                </div>
+            `).join('');
+        }
+        function toggleLogPanel() { document.getElementById('logPanel').classList.toggle('open'); }
+        function clearLogs() { logs = []; renderLogs(); document.getElementById('logCount').textContent = '0'; }
+
+        // ---------- Табы ----------
+        function switchTab(name) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + name).classList.add('active');
+            const navBtn = document.querySelector(`.nav-item[data-tab="${name}"]`);
+            if (navBtn) navBtn.classList.add('active');
+            const titles = {
+                'search': 'Поиск репозиториев',
+                'local': 'Локальные репозитории',
+                'history': 'История операций',
+                'details': 'Детали репозитория',
+                'file': 'Просмотр файла',
+                'console': 'Консоль сборки',
+            };
+            document.getElementById('pageTitle').textContent = titles[name] || '';
+            if (name === 'local') loadRepos();
+            if (name === 'history') loadHistory();
+        }
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', () => switchTab(item.dataset.tab));
+        });
+
+        // ---------- Статистика ----------
+        async function loadStats() {
+            const res = await fetch('/api/stats');
+            const s = await res.json();
+            document.getElementById('statsBar').innerHTML = `
+                <div class="stat-item"><span>${s.repo_count}</span><label>Репозиториев</label></div>
+                <div class="stat-item"><span>${s.total_size_mb} МБ</span><label>Размер</label></div>
+                <div class="stat-item"><span>${s.with_dockerfile}</span><label>Dockerfile</label></div>
+                <div class="stat-item"><span>${s.sh_count}</span><label>.sh</label></div>
+            `;
+            document.getElementById('repoBadge').textContent = s.repo_count;
+        }
+
+        // ---------- Поиск ----------
+        async function search() {
+            const q = document.getElementById('searchInput').value.trim();
+            if (!q) return;
+            const container = document.getElementById('searchResults');
+            container.innerHTML = '<p class="loading">Поиск...</p>';
+            addLog('search', `Поиск: "${q}"`);
+            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            if (!data.items || data.items.length === 0) {
+                container.innerHTML = '<p class="empty">Ничего не найдено.</p>';
+                addLog('search', 'Ничего не найдено', 'error');
+                return;
+            }
+            addLog('search', `Найдено: ${data.items.length}`);
+            container.innerHTML = data.items.map(repo => `
+                <div class="repo-card">
+                    <div class="repo-card-header">
+                        <strong>${repo.full_name}</strong>
+                        <span class="stars">⭐ ${repo.stars}</span>
+                    </div>
+                    <p class="repo-desc">${repo.description || 'Без описания'}</p>
+                    <div class="repo-meta">
+                        <span>${repo.language || '—'}</span>
+                        <span>🍴 ${repo.forks}</span>
+                        <span>${repo.updated_at.slice(0, 10)}</span>
+                    </div>
+                    <div class="repo-card-actions">
+                        <a href="${repo.html_url}" target="_blank" class="btn-link">GitHub</a>
+                        <button onclick="cloneRepo('${repo.clone_url}', '${repo.name}')" class="btn-primary">Клонировать</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function cloneRepo(clone_url, name) {
+            addLog('clone', `Клонирование ${name}...`);
+            const res = await fetch('/api/clone', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({clone_url, name})
+            });
+            const data = await res.json();
+            if (data.status === 'ok') { addLog('clone', data.message, 'ok'); loadStats(); loadRepos(); }
+            else { addLog('clone', data.message, 'error'); }
+        }
+
+        // ---------- Локальные ----------
+        async function loadRepos() {
+            const container = document.getElementById('repoList');
+            container.innerHTML = '<p class="loading">Загрузка...</p>';
+            const res = await fetch('/api/repos');
+            const data = await res.json();
+            if (!data.repos || data.repos.length === 0) {
+                container.innerHTML = '<p class="empty">Пока нет скачанных репозиториев.</p>';
+                return;
+            }
+            container.innerHTML = data.repos.map(repo => `
+                <div class="repo-card">
+                    <div class="repo-card-header">
+                        <strong>${repo.name}</strong>
+                        <div class="badges">
+                            ${repo.has_dockerfile ? '<span class="badge badge-blue">🐳</span>' : ''}
+                            ${repo.is_git ? '<span class="badge badge-gray">📂</span>' : ''}
+                            ${repo.sh_count > 0 ? `<span class="badge badge-green">${repo.sh_count} .sh</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="repo-meta">
+                        <span>${repo.size_mb} МБ</span>
+                        <span>${repo.modified}</span>
+                    </div>
+                    <div class="repo-card-actions">
+                        <button onclick="openRepo('${repo.name}')" class="btn-primary">Открыть</button>
+                        <button class="btn-danger" onclick="deleteRepo('${repo.name}')">🗑</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // ---------- Детали ----------
+        async function openRepo(name) {
+            currentRepo = name;
+            addLog('view', `Открытие ${name}`);
+            const res = await fetch(`/api/repos/${encodeURIComponent(name)}`);
+            const data = await res.json();
+            document.getElementById('detailsTitle').textContent = `📦 ${name}`;
+
+            let html = '';
+
+            html += `<div class="repo-hero">
+                <div class="repo-hero-top">
+                    <div class="repo-hero-icon">📦</div>
+                    <div class="repo-hero-title">
+                        <h3>${escapeHtml(name)}</h3>
+                        <div class="repo-hero-badges">
+                            ${data.git && data.git.branch ? `<span class="badge badge-blue">🌿 ${escapeHtml(data.git.branch)}</span>` : ''}
+                            ${data.dockerfile ? '<span class="badge badge-blue">🐳 Dockerfile</span>' : ''}
+                            ${data.git && data.git.remote ? '<span class="badge badge-gray">📂 Git</span>' : ''}
+                            ${data.sh_files && data.sh_files.length ? `<span class="badge badge-green">${data.sh_files.length} .sh</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="repo-hero-stats">
+                    <div class="hero-stat"><span>${data.file_count}</span><label>файлов</label></div>
+                    <div class="hero-stat"><span>${data.total_size_mb}</span><label>МБ</label></div>
+                    <div class="hero-stat"><span>${data.sh_files ? data.sh_files.length : 0}</span><label>скриптов</label></div>
+                    ${data.git && data.git.last_commit ? `<div class="hero-stat wide"><span>${escapeHtml(data.git.last_commit.split('|')[0] || '')}</span><label>коммит</label></div>` : ''}
+                </div>
+                <div class="repo-hero-actions">
+                    <button onclick="buildRepo('${name}')" class="btn-primary btn-build">🔨 Собрать</button>
+                    <button onclick="openFile('${name}', 'Dockerfile')" class="btn-secondary" ${!data.dockerfile ? 'disabled' : ''}>🐳 Dockerfile</button>
+                    <button onclick="switchTab('local')" class="btn-secondary">← Назад</button>
+                </div>
+            </div>`;
+
+            if (data.git && (data.git.remote || data.git.last_commit)) {
+                html += `<div class="info-block">
+                    <h3>🌿 Git</h3>
+                    ${data.git.branch ? `<p><b>Ветка:</b> ${escapeHtml(data.git.branch)}</p>` : ''}
+                    ${data.git.last_commit ? `<p><b>Последний коммит:</b> ${escapeHtml(data.git.last_commit)}</p>` : ''}
+                    ${data.git.remote ? `<p><b>Remote:</b> <code>${escapeHtml(data.git.remote)}</code></p>` : ''}
+                </div>`;
+            }
+
+            if (data.dockerfile) {
+                html += `<div class="info-block">
+                    <h3>🐳 Dockerfile</h3>
+                    <pre class="file-viewer small">${escapeHtml(data.dockerfile)}</pre>
+                </div>`;
+            }
+
+            if (data.sh_files && data.sh_files.length > 0) {
+                html += `<div class="info-block">
+                    <h3>📜 Shell-скрипты (${data.sh_files.length})</h3>
+                    <div class="sh-list">
+                        ${data.sh_files.map(sh => `
+                            <div class="sh-item">
+                                <span class="sh-icon">📜</span>
+                                <span class="sh-path">${sh}</span>
+                                <button onclick="runScript('${name}', '${sh}')" class="btn-primary btn-sm">▶</button>
+                                <button onclick="openFile('${name}', '${sh}')" class="btn-secondary btn-sm">👁</button>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>`;
+            }
+
+            html += `<div class="info-block">
+                <h3>📄 Файлы (${data.file_count}, ${data.total_size_mb} МБ)</h3>
+                <div class="file-list">
+                    ${data.files.map(f => `
+                        <div class="file-item" onclick="${f.is_text ? `openFile('${name}', '${f.path}')` : ''}">
+                            <span class="file-icon">${f.is_text ? '📄' : '📎'}</span>
+                            <span class="file-path">${f.path}</span>
+                            <span class="file-size">${formatSize(f.size)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+
+            document.getElementById('repoDetails').innerHTML = html;
+            switchTab('details');
+        }
+
+        // ---------- Просмотр файла ----------
+        async function openFile(repoName, path) {
+            const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/file?path=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (data.status === 'error') { addLog('view', data.message, 'error'); return; }
+            document.getElementById('fileTitle').textContent = `📄 ${path}`;
+            document.getElementById('fileContent').textContent = data.content;
+            switchTab('file');
+        }
+
+        // ---------- Консоль ----------
+        function openConsole(title) {
+            document.getElementById('consoleTitle').textContent = title;
+            document.getElementById('consoleBody').innerHTML = '';
+            document.getElementById('consoleStatus').textContent = '● выполняется';
+            document.getElementById('consoleStatus').className = 'console-status running';
+            document.getElementById('btnInstallDeps').style.display = 'none';
+            consoleHasDepError = false;
+            // Сбрасываем прокрутку контейнера, но не страницы
+            const body = document.getElementById('consoleBody');
+            body.scrollTop = 0;
+            switchTab('console');
+        }
+
+        function clearConsole() {
+            document.getElementById('consoleBody').innerHTML = '';
+        }
+
+        function consoleLog(text, level = 'info', time = '') {
+            const body = document.getElementById('consoleBody');
+            const div = document.createElement('div');
+            div.className = `console-line ${level}`;
+            div.innerHTML = `<span class="console-time">${time || new Date().toLocaleTimeString('ru-RU')}</span>${escapeHtml(text)}`;
+            body.appendChild(div);
+            // Автоскролл только внутри контейнера логов
+            body.scrollTop = body.scrollHeight;
+        }
+
+        async function buildRepo(name) {
+            consoleRepoName = name;
+            openConsole(`Сборка: ${name}`);
+            consoleLog(`🐳 Запуск сборки ${name}...`, 'info');
+
+            const startRes = await fetch('/api/build/start', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({repo_name: name, dockerfile_path: 'Dockerfile'})
+            });
+            const startData = await startRes.json();
+            if (startData.status !== 'ok') {
+                consoleLog(`❌ ${startData.message || 'Ошибка запуска'}`, 'error');
+                document.getElementById('consoleStatus').textContent = '● ошибка';
+                document.getElementById('consoleStatus').className = 'console-status error';
+                return;
+            }
+
+            consoleES = new EventSource(`/api/build-log/${encodeURIComponent(name)}`);
+            consoleES.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'log') {
+                    consoleLog(msg.text, msg.level, msg.time);
+                    if (msg.text.includes('отсутствующие зависимости')) {
+                        consoleHasDepError = true;
+                    }
+                } else if (msg.type === 'end') {
+                    consoleLog(`🏁 ${msg.summary || 'Завершено'}`, msg.status === 'ok' ? 'ok' : 'error');
+                    document.getElementById('consoleStatus').textContent = msg.status === 'ok' ? '● успешно' : '● ошибка';
+                    document.getElementById('consoleStatus').className = 'console-status ' + (msg.status === 'ok' ? 'ok' : 'error');
+                    consoleES.close();
+                    consoleES = null;
+                    if (consoleHasDepError) {
+                        document.getElementById('btnInstallDeps').style.display = 'inline-block';
+                    }
+                    loadStats();
+                    loadRepos();
+                }
+            };
+            consoleES.onerror = () => {
+                consoleLog('❌ Ошибка SSE-соединения', 'error');
+                if (consoleES) { consoleES.close(); consoleES = null; }
+            };
+        }
+
+        async function installDepsFromConsole() {
+            if (!consoleRepoName) return;
+            document.getElementById('btnInstallDeps').style.display = 'none';
+            consoleLog('📦 Установка зависимостей...', 'info');
+
+            const res = await fetch('/api/install-deps/start', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({repo_name: consoleRepoName, requirements_path: 'requirements.txt'})
+            });
+            const data = await res.json();
+            if (data.status !== 'ok') {
+                consoleLog(`❌ ${data.message || 'Ошибка'}`, 'error');
+                return;
+            }
+
+            const queueKey = data.queue_key;
+            consoleES = new EventSource(`/api/install-deps/log/${encodeURIComponent(queueKey)}`);
+            consoleES.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'log') {
+                    consoleLog(msg.text, msg.level, msg.time);
+                } else if (msg.type === 'end') {
+                    consoleLog(`🏁 ${msg.summary || 'Завершено'}`, msg.status === 'ok' ? 'ok' : 'error');
+                    document.getElementById('consoleStatus').textContent = msg.status === 'ok' ? '● успешно' : '● ошибка';
+                    document.getElementById('consoleStatus').className = 'console-status ' + (msg.status === 'ok' ? 'ok' : 'error');
+                    consoleES.close();
+                    consoleES = null;
+                    loadStats();
+                }
+            };
+        }
+
+        // ---------- Удаление ----------
+        async function deleteRepo(name) {
+            if (!confirm(`Удалить репозиторий "${name}"?`)) return;
+            addLog('delete', `Удаление ${name}...`);
+            const res = await fetch(`/api/repos/${encodeURIComponent(name)}`, {method: 'DELETE'});
+            const data = await res.json();
+            addLog('delete', data.message || data.detail, res.ok ? 'ok' : 'error');
+            loadRepos();
+            loadStats();
+        }
+
+        // ---------- История ----------
+        async function loadHistory() {
+            const res = await fetch('/api/history');
+            const data = await res.json();
+            const container = document.getElementById('historyList');
+            if (!data.history || data.history.length === 0) {
+                container.innerHTML = '<p class="empty">История пуста.</p>';
+                return;
+            }
+            container.innerHTML = data.history.slice().reverse().map(item => `
+                <div class="history-item ${item.status}">
+                    <span class="history-time">${item.time}</span>
+                    <span class="history-type">${item.type}</span>
+                    <span class="history-msg">${escapeHtml(item.message)}</span>
+                </div>
+            `).join('');
+        }
+
+        // ---------- Выполнение скрипта ----------
+        async function runScript(repoName, scriptPath) {
+            addLog('script', `Запуск ${scriptPath}...`);
+            const res = await fetch('/api/run-script', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({repo_name: repoName, script_path: scriptPath})
+            });
+            const data = await res.json();
+            consoleRepoName = repoName;
+            openConsole(`Скрипт: ${scriptPath}`);
+            if (data.stdout) data.stdout.splitlines().forEach(l => consoleLog(`stdout: ${l}`, 'ok'));
+            if (data.stderr) data.stderr.splitlines().forEach(l => consoleLog(`stderr: ${l}`, 'error'));
+            consoleLog(`Код возврата: ${data.returncode}`, data.returncode === 0 ? 'ok' : 'error');
+            document.getElementById('consoleStatus').textContent = data.returncode === 0 ? '● успешно' : '● ошибка';
+            document.getElementById('consoleStatus').className = 'console-status ' + (data.returncode === 0 ? 'ok' : 'error');
+        }
+
+        // ---------- Утилиты ----------
+        function escapeHtml(text) {
+            if (text === null || text === undefined) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' Б';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' КБ';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' МБ';
+        }
+
+        loadStats();
+        loadRepos();
+        addLog('system', 'Приложение запущено');
+    </script>
+</body>
+</html>
